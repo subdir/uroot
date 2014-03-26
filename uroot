@@ -1,0 +1,298 @@
+#!/usr/bin/env python
+# coding: utf-8
+r'''
+Simple sandboxing without superuser privileges.
+
+Иногда хочется установить какой-нибудь пакетик для временного пользования,
+а прав не хватает. Утилита uroot позволяет справиться с такой напастью,
+создавая песочницу с помощью unionfs поверх корневой файловой системы.
+
+Вот пример использования:
+
+    user@host:~$ uroot
+    user@host:/$ fakeroot apt-get install -y ruby
+    ....
+    Setting up ruby (1:1.9.3) ...
+    user@host:/$ ruby -e 'print "Hello World!\n"'
+    Hello World! 
+    user@host:/$ exit
+    exit
+    user@host:~$ ruby -e 'print "Goodbye World!\n"'
+    bash: ruby: command not found
+
+Если не используется опция -d, то для хранения изменений создается
+временная директория. Можно переопределить место где она будет создаваться
+с помощью опции -t.
+,
+'''
+
+from __future__ import print_function, with_statement
+
+import sys, os, time, fcntl, errno, shutil
+import argparse
+import json
+import tempfile
+from uuid import uuid4
+from subprocess import check_call, call
+from contextlib import contextmanager
+
+
+def open_if_not_exist(fname, mode):
+    if mode != 'w':
+        raise Exception('Mode must be "w"')
+    return os.fdopen(os.open(fname, os.O_WRONLY|os.O_CREAT|os.O_EXCL), 'w')
+
+
+@contextmanager
+def flock(name, shared=False, block=False):
+    with open(name) as lock_fobj:
+        try:
+            fcntl.flock(
+                lock_fobj.fileno(),
+                (
+                    (0 if block else fcntl.LOCK_NB)
+                    | (fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+                )
+            )
+        except IOError, err:
+            if getattr(err, 'errno', None) == errno.EAGAIN:
+                raise Exception('File {!r} is already locked'.format(name))
+            else:
+                raise
+
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_fobj.fileno(), fcntl.LOCK_UN)
+
+
+def rm_f(fname):
+    try:
+        os.unlink(fname)
+    except os.error, err:
+        if getattr(err, 'errno', None) != errno.ENOENT:
+            raise
+
+
+class DiffDir(object):
+    '''
+        DiffDir - это объект описывающий папку, в которую будут падать изменения
+        от unionfs, т.е. по сути это верхний read/write слой для unionfs.
+        Казалось бы зачем городить целый !ОБЪЕКТ! это ведь просто dirname,
+        ан нет, мы хотим решить парочку на первый взгляд неочевидных проблем:
+
+        Несколько слов про mntdir:
+
+        При использовании fakechroot совместно с долгоживущими дифдирами
+        мы получем проблему с символическими ссылками. Дело в том что
+        абсолютные симлинки созданные под fakechroot по факту ведут в текущий
+        mount point. Для того чтобы ссылки не оказались битыми при повторном
+        вызове uroot, один и тот же дифдир мы обязазаны монтировать в одну и ту
+        же директорию (mount point).
+
+        Можно было бы сделать mount point детерминированно вычислимым из
+        имени дифдира, но при этом мы теряем возможность их (дифдиры)
+        переименовывать.
+
+        Мы пойдем другим путем, будем генерировать для дифдира уникальный
+        айдишник и использовать его для создания точки монтирования (mntdir).
+
+        Кроме того мы будем использовать parent_mntdir для проверки того, что
+        родительский mntdir, на который мы ссылаемся, никуда не переехал и мы
+        можем безопасно его использовать.
+        
+    '''
+
+    CURRENT_VERSION = 1
+
+    def __init__(self, dirname, mntdir, parent_dirname, parent_mntdir):
+        self.dirname = dirname
+        self.mntdir = mntdir
+        self.parent_mntdir = parent_mntdir
+        self.parent_dirname = parent_dirname
+        self.version = self.CURRENT_VERSION
+
+    @classmethod
+    def bless(cls, dirname):
+        ''' Пометить директорию 'dirname' как DiffDir создав в ней файлик .uroot.json
+        '''
+        if not os.path.exists(cls.confname('/')):
+            parent_mntdir = None
+            parent_dirname = None
+        else:
+            with open(cls.confname('/')) as conf_fobj:
+                conf = json.load(conf_fobj)
+                parent_mntdir = conf.parent_mntdir
+                parent_dirname = conf.parent_dirname
+
+        self = cls(
+            dirname = os.path.abspath(dirname),
+            mntdir = '/tmp/uroot_mnt.' + uuid4().hex,
+            parent_mntdir = parent_mntdir,
+            parent_dirname = parent_dirname,
+        )
+
+        with open_if_not_exist(cls.confname(dirname), 'w') as conf:
+            json.dump(self.__dict__, conf)
+
+        return self
+
+    @classmethod
+    def open(cls, dirname):
+        with open(cls.confname(dirname)) as conf:
+            self = cls(**json.load(conf))
+
+        if os.path.abspath(dirname) != self.dirname:
+            self.dirname = os.path.abspath(dirname)
+            with open(cls.confname(dirname), 'w') as conf:
+                json.dump(self.__dict__, conf)
+
+        return self
+
+    @classmethod
+    def open_or_create(cls, dirname):
+        if os.path.exists(cls.confname(dirname)):
+            return cls.open(dirname)
+        else:
+            os.makedirs(dirname)
+            return cls.bless(dirname)
+
+    @staticmethod
+    def confname(dirname):
+        return os.path.join(dirname, '.uroot.json')
+
+    @contextmanager
+    def locked(self):
+        with flock(self.confname(self.dirname), block=False):
+            yield
+
+
+@contextmanager
+def make_diffdir(dirname=None, tmpdir=None):
+    if dirname is not None:
+        yield DiffDir.open_or_create(dirname)
+    else:
+        tmpdir = tempfile.mkdtemp(dir=tmpdir, prefix='uroot.')
+        os.chmod(tmpdir, 0755)
+        try:
+            yield DiffDir.bless(tmpdir)
+        finally:
+            shutil.rmtree(tmpdir)
+
+
+@contextmanager
+def make_mount_point(diffdir):
+    mntdir = os.path.join(diffdir.mntdir)
+    os.makedirs(mntdir)
+    try:
+        yield mntdir
+    finally:
+        os.rmdir(mntdir)
+
+
+def is_mounted(mntdir):
+    with open('/proc/self/mounts') as mounts:
+        for line in mounts:
+            cur_dev, cur_mntdir, tail = line.split(None, 2)
+            if mntdir == cur_mntdir:
+                return True
+    return False
+
+
+def lazy_unmount_fuse(mntdir):
+    ''' Был замысел сделать lazy unmount сразу после монтирования, в расчете
+        на то, что все дочерние процессы по прежнему будут видеть примонтированный
+        fuse. К сожалению, не выгорело, так как после lazy unmount все вновь
+        создаваемые процессы смотрят уже в отмонтированную папку.
+
+        Ну ничего, даже и без этого полезная штука.
+    '''
+    check_call(['fusermount', '-qzu', mntdir], shell=False)
+
+
+def unmount_fuse(mntdir):
+    if is_mounted(mntdir):
+        call(['fusermount', '-qu', mntdir], shell=False)
+        if is_mounted(mntdir):
+            time.sleep(2)
+            call(['fusermount', '-qu', mntdir], shell=False)
+            if is_mounted(mntdir):
+                print("Try to -TERM processes that prevents unmounting...", file=sys.stderr)
+                call(['fuser', '--verbose', '--kill', '-TERM', '--ismountpoint', mntdir], shell=False)
+                time.sleep(1)
+                call(['fusermount', '-qu', mntdir], shell=False)
+                if is_mounted(mntdir):
+                    print("Try to -KILL processes that prevents unmounting...", file=sys.stderr)
+                    call(['fuser', '--verbose', '--kill', '-KILL', '--ismountpoint', mntdir], shell=False)
+                    time.sleep(1)
+                    call(['fusermount', '-qu', mntdir], shell=False)
+                    if is_mounted(mntdir):
+                        raise Exception('Failed to unmount {!r}'.format(mntdir))
+
+
+@contextmanager
+def mount_unionfs(diffdir, mntdir, force_unmount=False):
+    check_call(
+        shell = False,
+        args = [
+            'unionfs-fuse',
+            '-o', 'dev,cow',
+            '-o', 'uid={},gid={}'.format(os.getuid(), os.getgid()), # иначе не сможем rm -rf /
+            diffdir.dirname + "=RW:/=RO",
+            mntdir,
+        ],
+    )
+    try:
+        yield
+    finally:
+        if force_unmount:
+            unmount_fuse(mntdir)
+        else:
+            lazy_unmount_fuse(mntdir)
+
+
+def main():
+    argparser = argparse.ArgumentParser(
+        formatter_class = argparse.RawDescriptionHelpFormatter,
+        description = __doc__,
+    )
+    argparser.add_argument(
+        '-d', '--diffdir', help='''Create named diff-directory, if this option is given
+                                   then diff-directory is not removed upon program completion.
+                                '''
+    )
+    argparser.add_argument(
+        '-t', '--tmpdir', 
+    )
+    argparser.add_argument(
+        '-f', '--force-unmount', action='store_true',
+                            help='''После завершения процесса uroot, файловая система unionfs
+                                    будет отмонтирована лениво (см. man umount), но если указана
+                                    опция -f, то отмонтирование будет принудительным, а если
+                                    понадобится, то и с убийством всех оппозиционно
+                                    настроенных процессов.
+                                 ''' 
+    )
+    argparser.add_argument('cmd_arg', nargs='*')
+    args = argparser.parse_args()
+
+    with make_diffdir(args.diffdir, tmpdir=args.tmpdir) as diffdir:
+        with make_mount_point(diffdir) as mntdir:
+            with mount_unionfs(diffdir, mntdir, args.force_unmount):
+
+                # dpkg, apt и пр. пытаются открыть эти файлы для того, чтобы повесить
+                # на них flock, само собой это им не удается, потому что файлы
+                # доступны на чтение только суперпользователю. Чтобы обойти проблему
+                # удаляем лок-файлы.
+                rm_f(os.path.join(mntdir, "var/lib/apt/lists/lock"))
+                rm_f(os.path.join(mntdir, "var/lib/dpkg/lock"))
+                rm_f(os.path.join(mntdir, "var/lib/dpkg/triggers/Lock"))
+                rm_f(os.path.join(mntdir, "var/cache/apt/archives/lock"))
+                rm_f(os.path.join(mntdir, "var/cache/debconf/passwords.dat"))
+
+                return call(['fakechroot', 'chroot', mntdir] + args.cmd_arg, shell=False)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+
