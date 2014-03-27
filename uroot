@@ -250,6 +250,9 @@ def main():
     argparser.add_argument(
         '-d', '--diffdir', help='''Create named diff-directory, if this option is given
                                    then diff-directory is not removed upon program completion.
+                                   Otherwise diff-directory will be considered temporary and
+                                   will be removed eventually. You can choose where to create
+                                   temporary diff-dirs with -t option.
                                 '''
     )
     argparser.add_argument(
