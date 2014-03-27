@@ -2,7 +2,7 @@ Source: uroot
 Section: unknown
 Priority: extra
 Maintainer: Alexey Akimov <subdir@gmail.com>
-Build-Depends: debhelper (>= 8.0.0), python-argcomplete
+Build-Depends: debhelper (>= 8.0.0)
 Standards-Version: 3.9.4
 Homepage: https://github.com/subdir/uroot
 Vcs-Git: git://github.com/subdir/uroot.git
