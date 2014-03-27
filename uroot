@@ -23,7 +23,6 @@ Simple sandboxing without superuser privileges.
 Если не используется опция -d, то для хранения изменений создается
 временная директория. Можно переопределить место где она будет создаваться
 с помощью опции -t.
-,
 '''
 
 from __future__ import print_function, with_statement
@@ -97,39 +96,26 @@ class DiffDir(object):
         Мы пойдем другим путем, будем генерировать для дифдира уникальный
         айдишник и использовать его для создания точки монтирования (mntdir).
 
-        Кроме того мы будем использовать parent_mntdir для проверки того, что
-        родительский mntdir, на который мы ссылаемся, никуда не переехал и мы
-        можем безопасно его использовать.
-        
+        Кроме того, в будущем, будем использовать parent_mntdir для проверки
+        того, что родительский mntdir, на который мы ссылаемся, никуда не переехал
+        и мы можем безопасно его использовать.
     '''
 
     CURRENT_VERSION = 1
 
-    def __init__(self, dirname, mntdir, parent_dirname, parent_mntdir):
+    def __init__(self, dirname, mntdir, version):
         self.dirname = dirname
         self.mntdir = mntdir
-        self.parent_mntdir = parent_mntdir
-        self.parent_dirname = parent_dirname
-        self.version = self.CURRENT_VERSION
+        self.version = version
 
     @classmethod
     def bless(cls, dirname):
         ''' Пометить директорию 'dirname' как DiffDir создав в ней файлик .uroot.json
         '''
-        if not os.path.exists(cls.confname('/')):
-            parent_mntdir = None
-            parent_dirname = None
-        else:
-            with open(cls.confname('/')) as conf_fobj:
-                conf = json.load(conf_fobj)
-                parent_mntdir = conf.parent_mntdir
-                parent_dirname = conf.parent_dirname
-
         self = cls(
             dirname = os.path.abspath(dirname),
             mntdir = '/tmp/uroot_mnt.' + uuid4().hex,
-            parent_mntdir = parent_mntdir,
-            parent_dirname = parent_dirname,
+            version = cls.CURRENT_VERSION,
         )
 
         with open_if_not_exist(cls.confname(dirname), 'w') as conf:
@@ -141,6 +127,11 @@ class DiffDir(object):
     def open(cls, dirname):
         with open(cls.confname(dirname)) as conf:
             self = cls(**json.load(conf))
+
+        if self.version != cls.CURRENT_VERSION:
+            raise Exception('Bad version {!r}, required {!r}'.format(
+                self.version, cls.CURRENT_VERSION
+            ))
 
         if os.path.abspath(dirname) != self.dirname:
             self.dirname = os.path.abspath(dirname)
