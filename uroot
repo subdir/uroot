@@ -267,7 +267,10 @@ def main():
                                     настроенных процессов.
                                  ''' 
     )
-    argparser.add_argument('cmd_arg', nargs='*')
+    # argparser.add_argument('cmd_arg', nargs='*')
+    # в 2.7.3 nargs='*' работает неправильно, argparse пытается
+    # отождать у баша опцию "-c": uroot bash -c 'echo ok' 
+    argparser.add_argument('cmd_arg', nargs=argparse.REMAINDER)
     args = argparser.parse_args()
 
     with make_diffdir(args.diffdir, tmpdir=args.tmpdir) as diffdir:
