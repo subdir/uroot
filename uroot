@@ -270,6 +270,7 @@ def main():
     # argparser.add_argument('cmd_arg', nargs='*')
     # в 2.7.3 nargs='*' работает неправильно, argparse пытается
     # отождать у баша опцию "-c": uroot bash -c 'echo ok' 
+    # см. http://stackoverflow.com/questions/6488752/dont-parse-options-after-the-last-positional-argument
     argparser.add_argument('cmd_arg', nargs=argparse.REMAINDER)
     args = argparser.parse_args()
 
