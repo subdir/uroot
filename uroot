@@ -267,7 +267,7 @@ def main():
                                     настроенных процессов.
                                  ''' 
     )
-    argparse.add_argument(
+    argparser.add_argument(
         '--chroot-chdir', help='''Не используйте эту опцию. Она используется
                                   неявно самим uroot-ом для того чтобы восстановить рабочую
                                   директорию после вызова chroot.
