@@ -267,12 +267,29 @@ def main():
                                     настроенных процессов.
                                  ''' 
     )
+    argparse.add_argument(
+        '--chroot-chdir', help='''Не используйте эту опцию. Она используется
+                                  неявно самим uroot-ом для того чтобы восстановить рабочую
+                                  директорию после вызова chroot.
+                               '''
+    )
     # argparser.add_argument('cmd_arg', nargs='*')
     # в 2.7.3 nargs='*' работает неправильно, argparse пытается
     # отжать у баша опцию "-c": uroot bash -c 'echo ok' 
     # см. http://stackoverflow.com/questions/6488752/dont-parse-options-after-the-last-positional-argument
     argparser.add_argument('cmd_arg', nargs=argparse.REMAINDER)
     args = argparser.parse_args()
+
+    if args.chroot_chdir:
+        # нужно сменить каталог, запустить программу и сдохнуть
+        if not args.cmd_arg:
+            if 'PS1' in os.environ:
+                os.putenv('PS1', 'uroot:' + os.environ['PS1'])
+            cmd_args = [os.environ.get('SHELL', '/bin/sh'), '-i']
+        else:
+            cmd_args = args.cmd_arg
+        os.chdir(args.chroot_chdir)
+        os.execv(cmd_args[0], cmd_args)
 
     with make_diffdir(args.diffdir, tmpdir=args.tmpdir) as diffdir:
         with make_mount_point(diffdir) as mntdir:
@@ -288,7 +305,12 @@ def main():
                 rm_f(os.path.join(mntdir, "var/cache/apt/archives/lock"))
                 rm_f(os.path.join(mntdir, "var/cache/debconf/passwords.dat"))
 
-                return call(['fakechroot', 'chroot', mntdir] + args.cmd_arg, shell=False)
+                cwd = os.path.abspath(os.getcwd())
+                uroot = os.path.abspath(sys.argv[0])
+                return call(
+                    ['fakechroot', 'chroot', mntdir, uroot, '--chroot-chdir', cwd] + args.cmd_arg,
+                    shell = False,
+                )
 
 
 if __name__ == '__main__':
