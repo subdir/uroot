@@ -268,7 +268,7 @@ def main():
                                  ''' 
     )
     argparser.add_argument(
-        '-c', '--init-cmd', action="append",
+        '-c', '--init-cmd', action="append", default=[],
                           help='''Run shell with -c "INIT_CMD" in uroot environment just before
                                   executing cmd_arg or falling to interactive shell. May be
                                   specified multiple times.
