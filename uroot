@@ -283,13 +283,12 @@ def main():
     if args.chroot_chdir:
         # нужно сменить каталог, запустить программу и сдохнуть
         if not args.cmd_arg:
-            if 'PS1' in os.environ:
-                os.putenv('PS1', 'uroot:' + os.environ['PS1'])
+            os.environ['debian_chroot'] = 'uroot'
             cmd_args = [os.environ.get('SHELL', '/bin/sh'), '-i']
         else:
             cmd_args = args.cmd_arg
         os.chdir(args.chroot_chdir)
-        os.execvp(cmd_args[0], cmd_args)
+        os.execvpe(cmd_args[0], cmd_args, os.environ)
 
     with make_diffdir(args.diffdir, tmpdir=args.tmpdir) as diffdir:
         with make_mount_point(diffdir) as mntdir:
